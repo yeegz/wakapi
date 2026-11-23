@@ -20,6 +20,8 @@ import (
 const (
 	dailyStatsMinRangeDays = 3
 	dailyStatsMaxRangeDays = 31
+	// the hourly breakdown chart is hidden above this many (merged) segments
+	maxHourlyBreakdownItems = 200
 )
 
 type SummaryHandler struct {
@@ -129,13 +131,14 @@ func (h *SummaryHandler) GetIndex(w http.ResponseWriter, r *http.Request) {
 		hourlyBreakdownFrom = summaryParams.To.Add(-24 * time.Hour)
 	}
 	if durations, err := h.durationSrvc.Get(hourlyBreakdownFrom, summaryParams.To, summaryParams.User, summaryParams.Filters, nil, false); err == nil {
-		// for excessively many small segments, plotting is too performance-heavy and will freeze the browser (see https://github.com/muety/wakapi/issues/871)
+		hourlyBreakdown = view.NewHourlyBreakdownViewModel(view.NewHourlyBreakdownItems(durations, func(t uint8, k string) string {
+			s, _ := h.aliasSrvc.GetAliasOrDefault(user.ID, t, k)
+			return s
+		}))
+		// adjacent segments are merged above, but for excessively many blocks, plotting is still too performance-heavy and will freeze the browser (see https://github.com/muety/wakapi/issues/871)
 		// and the chart would be unreadable anyway, so we simply disable it
-		if len(durations) <= 200 {
-			hourlyBreakdown = view.NewHourlyBreakdownViewModel(view.NewHourlyBreakdownItems(durations, func(t uint8, k string) string {
-				s, _ := h.aliasSrvc.GetAliasOrDefault(user.ID, t, k)
-				return s
-			}))
+		if hourlyBreakdown.NumItems() > maxHourlyBreakdownItems {
+			hourlyBreakdown = nil
 		}
 	} else {
 		conf.Log().Request(r).Error("failed to load hourly breakdown stats", "error", err)

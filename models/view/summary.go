@@ -57,6 +57,12 @@ type HourlyBreakdownItem struct {
 	Duration time.Duration `json:"duration"`
 	Entity   string        `json:"entity"`
 	Project  string        `json:"-"`
+	// Timeout is the user's heartbeat timeout. Items of the same project that are less than this apart are merged into one block.
+	Timeout time.Duration `json:"-"`
+}
+
+func (h *HourlyBreakdownItem) ToTime() time.Time {
+	return h.FromTime.Add(h.Duration)
 }
 
 func NewTimelineViewModel(summaries []*models.Summary) []*TimelineViewModel {
@@ -83,6 +89,7 @@ func NewHourlyBreakdownItems(durations models.Durations, resolve models.AliasRes
 				Duration: duration.Duration,
 				Entity:   duration.Entity,
 				Project:  duration.Project,
+				Timeout:  duration.Timeout,
 			}
 		})
 
@@ -99,21 +106,52 @@ func NewHourlyBreakdownViewModel(items HourlyBreakdownItems) HourlyBreakdownsVie
 	hourlyBreakdownMap := slice.GroupWith(items, func(item *HourlyBreakdownItem) string { return item.Project })
 
 	hourlyBreakdown := make([]*HourlyBreakdownViewModel, 0)
-	for project, items := range hourlyBreakdownMap {
+	for project, projectItems := range hourlyBreakdownMap {
+		slice.SortBy(projectItems, func(i, j *HourlyBreakdownItem) bool {
+			return i.FromTime.Before(j.FromTime)
+		})
 		hourlyBreakdown = append(hourlyBreakdown, &HourlyBreakdownViewModel{
-			Items:   items,
+			Items:   coalesceHourlyBreakdownItems(projectItems),
 			Project: project,
 		})
 	}
 
-	hourlyBreakdownSorted := slice.Map(hourlyBreakdown, func(_ int, item *HourlyBreakdownViewModel) *HourlyBreakdownViewModel {
-		slice.SortBy(item.Items, func(i, j *HourlyBreakdownItem) bool {
-			return i.FromTime.Before(j.FromTime)
-		})
-		return item
-	})
+	return hourlyBreakdown
+}
 
-	return hourlyBreakdownSorted
+// NumItems returns the number of bars the chart would draw.
+func (vm HourlyBreakdownsViewModel) NumItems() int {
+	var n int
+	for _, project := range vm {
+		n += len(project.Items)
+	}
+	return n
+}
+
+// coalesceHourlyBreakdownItems merges items that are at most their timeout apart into one block (see https://github.com/muety/wakapi/issues/952).
+// Durations are split whenever the entity, branch, language, etc. changes, so a normal day can have hundreds of tiny segments of the same project.
+// Items must be of one project and sorted by start time. A merged block keeps the entity of its first item.
+func coalesceHourlyBreakdownItems(items HourlyBreakdownItems) HourlyBreakdownItems {
+	if len(items) == 0 {
+		return items
+	}
+
+	merged := make(HourlyBreakdownItems, 0, len(items))
+	current := *items[0]
+	for _, next := range items[1:] {
+		if next.FromTime.Sub(current.ToTime()) <= current.Timeout {
+			if end := next.ToTime(); end.After(current.ToTime()) {
+				current.Duration = end.Sub(current.FromTime)
+			}
+			continue
+		}
+		block := current
+		merged = append(merged, &block)
+		current = *next
+	}
+	merged = append(merged, &current)
+
+	return merged
 }
 
 func (s SummaryViewModel) UserDataExpiring() bool {
